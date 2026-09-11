@@ -78,24 +78,23 @@ same token for `GET /api/items` and the `POST /api/give`).
    (`mvm_backpack.db`) is created automatically in `addons/sourcemod/data/`.
    The `items_game_item_2027` attribute ("is australium item") applies the
    gold material; it is already present in TF2's item definitions.
-5. Windows servers: the TCP listener binds by default to
-   `127.0.0.1:8821` (see ConVars) — port-forward/firewall accordingly.
+5. Windows servers: the TCP listener binds to `0.0.0.0:<port>`
+   (`sm_mvm_backpack_port`, default `8821`) — see the ConVars below.
 
 ### ConVars
 
-| ConVar                            | default | description                                  |
-|-----------------------------------|---------|----------------------------------------------|
-| `sm_mvm_backpack_aussie_chance`   | `10`    | % chance of an australium drop per mission   |
-| `sm_mvm_backpack_golden_chance`   | `1`     | % chance of a golden wrench drop per mission |
-| `sm_mvm_backpack_golden_once`     | `1`     | golden wrench only once per player?          |
-| `sm_mvm_backpack_token_ttl`       | `60`    | MOTD token validity in seconds               |
-| `sm_mvm_backpack_host`            | `127.0.0.1` | API bind address                     |
-| `sm_mvm_backpack_port`            | `8821`  | API TCP port                                  |
+| ConVar                          | default | description                                     |
+|---------------------------------|---------|-------------------------------------------------|
+| `sm_mvm_backpack_aussie_chance` | `10`    | % chance of an australium drop per mission      |
+| `sm_mvm_backpack_golden_chance` | `1`     | % chance of a golden wrench drop per mission    |
+| `sm_mvm_backpack_port`          | `8821`  | TCP port the backpack JSON API listens on       |
+| `sm_mvm_backpack_web_url`       | `http://127.0.0.1:8788` | Pages frontend URL; the MOTD opens `<url>?token=...` |
 
-### Admins
+The MOTD token TTL is compiled in (`TOKEN_TTL`, 60 seconds).
 
-- `sm_mvm_backpack_reset <steamid>` — clear that player's pending rewards.
-- `sm_mvm_backpack_reload` — reload `mvm_rewards.cfg`.
+### In-game commands
+
+- `!backpack` / `!bp` — open your MvM backpack (opens the MOTD).
 
 ## Frontend / Functions deployment
 
@@ -110,8 +109,12 @@ npx wrangler pages deploy . --project-name mvm-backpack
 Set the `GAME_SERVER_URL` **Pages environment variable**:
 
 - Game server behind a public IP: `http://<server-ip>:8821`
-- Otherwise use a cloudflared tunnel (see `cloudflared/config.yml`) and set it
-  to the public tunnel URL, e.g. `https://mvm-api.example.com`.
+- Behind **CGNAT** or a NAT you can't port-forward (no public IP, inbound
+  connections impossible): use a `cloudflared` tunnel — it only needs
+  *outbound* connections, which CGNAT allows. See `cloudflared/config.yml`
+  and set `GAME_SERVER_URL` to the tunnel's public URL, e.g.
+  `https://mvm-api.example.com`. Run the tunnel client on the same machine as
+  the TF2 server so it can reach `127.0.0.1:8821`.
 
 Local testing with `wrangler pages dev` reads `GAME_SERVER_URL` from
 `.dev.vars` (copy `.dev.vars.example`).
@@ -137,5 +140,6 @@ Quality numbers follow the TF2 item-schema enum — notably `11` = Strange
   (60-second expiry limits exposure).
 - The Functions proxy ships `Access-Control-Allow-Origin: *`. If you want to
   restrict it, harden `functions/_lib.js`.
-- Bind the TCP API to `127.0.0.1` and expose it only through the tunnel /
-  firewall rules you control.
+- The plugin binds the TCP API to `0.0.0.0:<port>`. Restrict it with your
+  firewall (only allow the cloudflared host/cloudflare egress or your IP), or
+  NAT it so the API is not exposed to the public internet directly.
