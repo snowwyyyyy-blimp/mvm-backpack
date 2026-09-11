@@ -1,0 +1,22 @@
+# Example cloudflared tunnel that exposes the SourceMod socket JSON API
+# (listening on the game server at 127.0.0.1:8821) as a public URL.
+#
+# Usage:
+#   1. cloudflared tunnel login
+#   2. cloudflared tunnel create mvm-backpack
+#      -> writes <UUID>.json under ~/.cloudflared/
+#   3. Replace <TUNNEL-UUID> below with the UUID from step 2 and your
+#      chosen subdomain/zone.
+#   4. cloudflared tunnel route dns mvm-backpack mvm-api.yourdomain.com
+#   5. cloudflared tunnel --config cloudflared/config.yml run mvm-backpack
+#
+# Then set the Pages environment variable to the public tunnel URL:
+#   GAME_SERVER_URL=https://mvm-api.yourdomain.com   (services via /api/*)
+
+tunnel: <TUNNEL-UUID>
+credentials-file: /root/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: mvm-api.yourdomain.com
+    service: http://127.0.0.1:8821
+  - service: http_status:404

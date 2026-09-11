@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev` (local Pages Functions testing).
+# In production set the same variable in the Pages project settings
+# (Settings > Environment variables > Production).
+GAME_SERVER_URL=http://127.0.0.1:8821

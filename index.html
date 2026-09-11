@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MvM Backpack</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">&#9889;</span>
+      <span>MvM Backpack</span>
+    </div>
+    <div class="status">
+      <span id="playerName" class="player">No player</span>
+      <span id="stats" class="stats"></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="controls">
+      <div id="intro" class="intro">
+        Complete MvM missions for a chance to earn Australium weapons and the legendary
+        <strong>Golden Wrench</strong>. Open this page in-game with <code>!backpack</code> to
+        claim your rewards.
+      </div>
+      <div id="login" class="login hidden">
+        <label for="token">Claim token</label>
+        <input id="token" type="text" placeholder="Paste token from !backpack" autocomplete="off" />
+        <button id="loginBtn" type="button">Load backpack</button>
+      </div>
+      <div id="filterBar" class="filter hidden">
+        <input id="search" type="search" placeholder="Search items..." />
+        <button id="logoutBtn" type="button">Clear token</button>
+      </div>
+    </section>
+
+    <section id="items" class="grid" aria-live="polite"></section>
+
+    <section id="toast" class="toast" role="status"></section>
+  </main>
+
+  <footer class="footer">
+    <span>Backend: SourceMod + SQLite &middot; Frontend: Cloudflare Pages</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
