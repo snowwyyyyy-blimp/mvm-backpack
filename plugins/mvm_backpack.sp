@@ -5,11 +5,12 @@
 #include <tf2_stocks>
 #include <socket>
 #include <tf2items>
+#include <gimme>
 
 #define PLUGIN_VERSION "1.0.0"
 
 #define MAX_ITEMS     64
-#define TOKEN_LENGTH  24
+#define TOKEN_LENGTH  4
 #define TOKEN_TTL     60
 #define HTTP_BUF_SIZE 8192
 
@@ -51,6 +52,8 @@ new StringMap:g_hTokenExpire;
 
 /* Scratch buffer for building large async responses (main-thread only). */
 new String:g_sJsonBuf[8192];
+
+forward FindItemByKey(const String:key[]);
 
 public Plugin:myinfo =
 {
@@ -317,6 +320,27 @@ public Action:Command_Backpack(client, args)
     IntToString(GetTime() + TOKEN_TTL, expiry, sizeof(expiry));
     g_hTokenExpire.SetString(token, expiry);
 
+    PrintToChat(client, " \x02[MvM Backpack]\x01 Your code: \x03%s\x01 (expires in %d sec)", token, TOKEN_TTL);
+
+    new Handle:dp = CreateDataPack();
+    WritePackCell(dp, client);
+    WritePackString(dp, token);
+    CreateTimer(5.0, Timer_OpenBackpack, dp);
+
+    return Plugin_Handled;
+}
+
+public Action:Timer_OpenBackpack(Handle:timer, Handle:dp)
+{
+    ResetPack(dp);
+    new client = ReadPackCell(dp);
+    decl String:token[TOKEN_LENGTH + 1];
+    ReadPackString(dp, token, sizeof(token));
+    CloseHandle(dp);
+
+    if (client == 0 || !IsClientInGame(client))
+        return Plugin_Handled;
+
     decl String:base[256];
     GetConVarString(g_cvWebBaseUrl, base, sizeof(base));
 
@@ -327,16 +351,16 @@ public Action:Command_Backpack(client, args)
         Format(url, sizeof(url), "%s&token=%s", base, token);
 
     ShowMOTDPanel(client, "MvM Backpack", url, MOTDPANEL_TYPE_URL);
-    PrintToChat(client, " \x02[MvM Backpack]\x01 Backpack opened. Token expires in %d seconds.", TOKEN_TTL);
+    PrintToChat(client, " \x02[MvM Backpack]\x01 Backpack open. Type your code \x03%s\x01 in the page.", token);
 
     return Plugin_Handled;
 }
 
 GenerateToken(String:buffer[], size)
 {
-    static const String:chars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    static const String:chars[] = "0123456789";
     for (new i = 0; i < size - 1; i++)
-        buffer[i] = chars[GetRandomInt(0, sizeof(chars) - 2)];
+        buffer[i] = chars[GetRandomInt(0, sizeof(chars) - 2)] & 0xFF;
     buffer[size - 1] = 0;
 }
 
@@ -408,6 +432,7 @@ public OnSocketIncoming(Socket server, Socket client, const char[] ip, int port,
     g_hReqBuf.SetString(key, empty);
 
     client.SetReceiveCallback(OnSocketReceive);
+    client.SetOption(SocketAutoFreeHandle, 1);
 }
 
 public OnSocketReceive(Socket sock, const char[] data, const int size, const char[] senderIP, int senderPort, any data2)
@@ -423,9 +448,25 @@ public OnSocketReceive(Socket sock, const char[] data, const int size, const cha
     g_hReqBuf.GetString(key, buf, sizeof(buf));
     StrCat(buf, sizeof(buf), data);
 
-    if (StrContains(buf, "\r\n\r\n") != -1)
+    new iBody = StrContains(buf, "\r\n\r\n");
+    if (iBody != -1)
     {
-        HandleRequest(sock, key, buf);
+        /* Headers received — now wait for the full Content-Length body.
+         * OnSocketReceive fires per TCP segment; the body may arrive in
+         * a later segment, so we must not call HandleRequest prematurely. */
+        decl String:clStr[16];
+        FindHeaderValue(buf, "Content-Length", clStr, sizeof(clStr));
+        new contentLen = StringToInt(clStr);
+        new expected = iBody + 4 + contentLen;    /* 4 = len("\r\n\r\n") */
+
+        if (strlen(buf) >= expected)
+        {
+            HandleRequest(sock, key, buf);
+        }
+        else
+        {
+            g_hReqBuf.SetString(key, buf);
+        }
     }
     else if (strlen(buf) >= HTTP_BUF_SIZE)
     {
@@ -442,30 +483,41 @@ public OnSocketReceive(Socket sock, const char[] data, const int size, const cha
 /* Minimal HTTP/1.1 server: GET /api/items?token=..., POST /api/give {JSON} */
 HandleRequest(Socket sock, const String:key[], const String:request[])
 {
+    /* Extract request line: everything up to the first CRLF or LF.
+     * NOTE: BreakString() cannot be used here - it splits on the first
+     * whitespace token, which would truncate "GET /x HTTP/1.1" to "GET". */
     decl String:requestLine[1024];
-    new idx = BreakString(request, requestLine, sizeof(requestLine));
-    if (idx == -1)
+    new lineLen = StrContains(request, "\r\n");
+    if (lineLen == -1)
+        lineLen = StrContains(request, "\n");
+    if (lineLen <= 0)
     {
+        LogError("[mvm] parse1 noline reqlen=%d", strlen(request));
         ReplyJSON(sock, 400, "{\"error\":\"bad_request\"}");
         CloseSockCleanup(sock);
         return;
     }
+    if (lineLen >= sizeof(requestLine))
+        lineLen = sizeof(requestLine) - 1;
+    strcopy(requestLine, lineLen + 1, request);
+    requestLine[lineLen] = 0;
 
     decl String:method[16];
+    /* SplitString returns index AFTER the delimiter; requestLine[idx] is next token start */
     new idx2 = SplitString(requestLine, " ", method, sizeof(method));
     if (idx2 == -1)
     {
+        LogError("[mvm] parse2 idx2=%d reqline=\"%s\"", idx2, requestLine);
         ReplyJSON(sock, 400, "{\"error\":\"bad_request\"}");
         CloseSockCleanup(sock);
         return;
     }
 
-    /* Reset + sanity: requestLine is "GET /x HTTP/1.1" */
     decl String:path[512];
-    new pathStart = idx2 + 1;
-    new idx3 = SplitString(requestLine[pathStart], " ", path, sizeof(path));
+    new idx3 = SplitString(requestLine[idx2], " ", path, sizeof(path));
     if (idx3 == -1)
     {
+        LogError("[mvm] parse3 idx3=%d method=\"%s\"", idx3, method);
         ReplyJSON(sock, 400, "{\"error\":\"bad_request\"}");
         CloseSockCleanup(sock);
         return;
@@ -513,8 +565,12 @@ HandleRequest(Socket sock, const String:key[], const String:request[])
     }
 }
 
-/* Closes the socket and removes all maps we keyed by it.
- * Async DB handlers must call this after their final ReplyJSON. */
+/* Removes all maps we keyed by a client socket.
+ * NOTE: we do NOT Close() here — Send() is asynchronous (uv_write is posted to
+ * the extension's event loop), so closing right after would cancel the pending
+ * write and yield an empty reply. Client sockets are set SocketAutoFreeHandle,
+ * so they release themselves once the client disconnects after our reply
+ * (we always send "Connection: close"). */
 CloseSockCleanup(Socket sock)
 {
     if (sock == null)
@@ -523,7 +579,6 @@ CloseSockCleanup(Socket sock)
     decl String:key[24];
     Format(key, sizeof(key), "SOCK:%d", _:sock);
 
-    sock.Close();
     g_hReqBuf.Remove(key);
     g_hReqCtx.Remove(key);
 
@@ -672,6 +727,15 @@ HandleGive(Socket sock, const String:body[])
         return;
     }
 
+    /* Only reward keys loaded from the config are ever queryable. This both
+     * rejects unknown keys early and neutralizes SQL injection via item_key. */
+    if (FindItemByKey(itemKey) == -1)
+    {
+        ReplyJSON(sock, 404, "{\"error\":\"unknown_item\"}");
+        CloseSockCleanup(sock);
+        return;
+    }
+
     decl String:authid[32];
     if (!ResolveToken(token, authid, sizeof(authid)))
     {
@@ -779,7 +843,7 @@ FindClientByAuth(const String:authid[])
     return 0;
 }
 
-FindItemByKey(const String:key[])
+public FindItemByKey(const String:key[])
 {
     for (new i = 0; i < g_iItemCount; i++)
         if (StrEqual(g_sItemKey[i], key))
@@ -789,7 +853,22 @@ FindItemByKey(const String:key[])
 
 GiveItemInGame(client, String:name[], String:cls[], index, quality, pool)
 {
-    new Handle:item = TF2Items_CreateItem(OVERRIDE_ALL);
+    /* Prefer the gimme plugin: giveitem produces genuine
+       australium/golden items (warpaint 1 = australium).
+       Regular giveitem (not giveitemp) so rewards don't stack. */
+    new bool:gimmeOk = (GetFeatureStatus(FeatureType_Native, "giveitem") == FeatureStatus_Available);
+    if (gimmeOk)
+    {
+        new warpaint = (pool == _:Pool_Aussie) ? 1 : 0;
+        if (giveitem(client, index, warpaint, 0, 0))
+        {
+            PrintToChat(client, " \x02[MvM Backpack]\x01 Here is your \x03%s\x01!", name);
+            return;
+        }
+        LogMessage("[MvMBP] gimme giveitem failed for %N (%s), falling back to TF2Items", client, name);
+    }
+
+    new Handle:item = TF2Items_CreateItem(OVERRIDE_ALL | FORCE_GENERATION);
     if (item == INVALID_HANDLE)
         return;
 
@@ -927,10 +1006,42 @@ GetQueryParam(const String:query[], const String:key[], String:out[], size)
     }
 }
 
+/* Reads an HTTP header value. headers = the raw header block (before \r\n\r\n). */
+FindHeaderValue(const String:headers[], const String:name[], String:out[], size)
+{
+    out[0] = 0;
+    decl String:pattern[64];
+    Format(pattern, sizeof(pattern), "\r\n%s:", name);
+    new iStart = StrContains(headers, pattern);
+    if (iStart == -1)
+    {
+        /* first header may follow the request line, also accept a leading "Name:" */
+        Format(pattern, sizeof(pattern), "%s:", name);
+        iStart = StrContains(headers, pattern);
+        if (iStart == -1)
+            return;
+    }
+
+    /* Advance just past "Name:" — the matched pattern already ends at the colon
+     * (and includes the leading CRLF in the "\r\n%s:" form). */
+    iStart += strlen(pattern);
+    while ((headers[iStart] & 0xFF) == ' ' || (headers[iStart] & 0xFF) == '\t')
+        iStart++;
+
+    new iEnd = iStart;
+    while ((headers[iEnd] & 0xFF) != 0 && (headers[iEnd] & 0xFF) != '\r' && (headers[iEnd] & 0xFF) != '\n')
+        iEnd++;
+
+    new len = iEnd - iStart;
+    if (len >= size) len = size - 1;
+    if (len > 0)
+        strcopy(out, len + 1, headers[iStart]);
+}
+
 GetJsonString(const String:body[], const String:key[], String:out[], size)
 {
     out[0] = 0;
-    if (body[0] == 0)
+    if ((body[0] & 0xFF) == 0)
         return;
 
     decl String:pattern[64];
@@ -942,14 +1053,14 @@ GetJsonString(const String:body[], const String:key[], String:out[], size)
     iStart += strlen(pattern);
     iStart += 1; /* skip colon */
 
-    while (body[iStart] == ' ' || body[iStart] == '\t')
+    while ((body[iStart] & 0xFF) == ' ' || (body[iStart] & 0xFF) == '\t')
         iStart++;
 
-    if (body[iStart] != '"')
+    if ((body[iStart] & 0xFF) != '"')
     {
         /* numeric/boolean literal */
         new iEnd = iStart;
-        while (body[iEnd] != 0 && body[iEnd] != ',' && body[iEnd] != '}')
+        while ((body[iEnd] & 0xFF) != 0 && (body[iEnd] & 0xFF) != ',' && (body[iEnd] & 0xFF) != '}')
             iEnd++;
         new len = iEnd - iStart;
         if (len >= size) len = size - 1;
@@ -960,7 +1071,7 @@ GetJsonString(const String:body[], const String:key[], String:out[], size)
 
     iStart++;
     new iEnd = iStart;
-    while (body[iEnd] != 0 && body[iEnd] != '"')
+    while ((body[iEnd] & 0xFF) != 0 && (body[iEnd] & 0xFF) != '"')
         iEnd++;
     new len = iEnd - iStart;
     if (len >= size) len = size - 1;
@@ -975,18 +1086,18 @@ GetJsonString(const String:body[], const String:key[], String:out[], size)
 EscapeJSON(const String:input[], String:out[], size)
 {
     new o = 0;
-    for (new i = 0; input[i] != 0; i++)
+    for (new i = 0; (input[i] & 0xFF) != 0; i++)
     {
         if (o >= size - 2)
             break;
-        switch (input[i])
+        switch (input[i] & 0xFF)
         {
             case '"':  { out[o++] = '\\'; out[o++] = '"'; }
             case '\\': { out[o++] = '\\'; out[o++] = '\\'; }
             case '\n': { out[o++] = '\\'; out[o++] = 'n'; }
             case '\t': { out[o++] = '\\'; out[o++] = 't'; }
             default:
-                out[o++] = input[i];
+                out[o++] = input[i] & 0xFF;
         }
     }
     out[o] = 0;
@@ -999,10 +1110,10 @@ URLDecode(String:s[], size)
     new write = 0;
     while (read < len)
     {
-        if (s[read] == '%' && read + 2 < len)
+        if ((s[read] & 0xFF) == '%' && read + 2 < len)
         {
-            new hi = HexDigit(s[read + 1]);
-            new lo = HexDigit(s[read + 2]);
+            new hi = HexDigit(s[read + 1] & 0xFF);
+            new lo = HexDigit(s[read + 2] & 0xFF);
             if (hi != -1 && lo != -1)
             {
                 s[write++] = hi * 16 + lo;
@@ -1010,13 +1121,14 @@ URLDecode(String:s[], size)
                 continue;
             }
         }
-        else if (s[read] == '+')
+        else if ((s[read] & 0xFF) == '+')
         {
             s[write++] = ' ';
             read++;
             continue;
         }
-        s[write++] = s[read++];
+        s[write++] = s[read] & 0xFF;
+        read++;
     }
     s[write] = 0;
 }
