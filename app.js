@@ -73,8 +73,7 @@ function render() {
   }
 
   const total = state.items.length;
-  const unclaimed = total ? state.items.filter((i) => !i.claimed).length : 0;
-  stats.textContent = total ? `${unclaimed} of ${total} unclaimed` : "";
+  stats.textContent = total ? `${total} reward${total === 1 ? "" : "s"}` : "";
 
   if (!total) {
     grid.innerHTML = `<div class="empty">No rewards yet. Beat MvM missions to earn items!</div>`;
@@ -83,12 +82,9 @@ function render() {
 
   grid.innerHTML = state.items
     .map((it) => {
-      const claimed = !!it.claimed;
-      const claimHtml = claimed
-        ? `<div class="claim claimed">Claimed &#10003;</div>`
-        : `<div class="claim">Claim in game &#x2794;</div>`;
+      const claimHtml = `<div class="claim">Claim in game &#x2794;</div>`;
       return `
-      <div class="card ${claimed ? "claimed" : ""}" data-key="${escapeAttr(it.item_key)}" data-name="${escapeAttr(it.name)}" data-claimed="${claimed}">
+      <div class="card" data-key="${escapeAttr(it.item_key)}" data-name="${escapeAttr(it.name)}">
         <div class="icon">&#128296;</div>
         <div class="name ${QUALITY_CLASS(it.quality)}">${escapeHtml(it.name)}</div>
         <div class="meta">
@@ -133,17 +129,11 @@ async function claimItem(itemKey, cardEl) {
       method: "POST",
       body: JSON.stringify({ token: state.token, item_key: itemKey })
     });
-    state.items = state.items.map((i) => (i.item_key === itemKey ? { ...i, claimed: true } : i));
-    render();
+    cardEl.classList.remove("claiming");
     toast("Item spawned in your inventory!", "success");
   } catch (e) {
-    if (e.message === "already_claimed") {
-      state.items = state.items.map((i) => (i.item_key === itemKey ? { ...i, claimed: true } : i));
-      render();
-    } else {
-      toast(e.message || "Could not claim item", "error");
-      cardEl.classList.remove("claiming");
-    }
+    toast(e.message || "Could not claim item", "error");
+    cardEl.classList.remove("claiming");
   }
 }
 
@@ -157,7 +147,7 @@ function onSearchInput(e) {
 function init() {
   $("#items").addEventListener("click", (e) => {
     const card = e.target.closest(".card");
-    if (!card || card.dataset.claimed === "true") return;
+    if (!card) return;
     claimItem(card.dataset.key, card);
   });
 

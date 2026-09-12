@@ -782,12 +782,7 @@ public DB_OnGiveLookup(Handle:owner, Handle:results, const String:error[], any:d
         return;
     }
 
-    if (!SQL_IsFieldNull(results, 6))
-    {
-        ReplyJSON(sock, 409, "{\"error\":\"already_claimed\"}");
-        CloseSockCleanup(sock);
-        return;
-    }
+    /* Items are always redeemable — no already_claimed gate. */
 
     /* Must be connected to receive it. */
     new client = FindClientByAuth(authid);
@@ -806,10 +801,10 @@ public DB_OnGiveLookup(Handle:owner, Handle:results, const String:error[], any:d
     new index   = SQL_FetchInt(results, 3);
     new quality = SQL_FetchInt(results, 4);
 
-    /* Mark claimed, then hand out the weapon. */
+    /* Stamp last claim time, then hand out the weapon. */
     new String:q[512];
     Format(q, sizeof(q),
-        "UPDATE mvm_backpack SET claimed_at=%d WHERE steamid='%s' AND item_key='%s' AND claimed_at IS NULL",
+        "UPDATE mvm_backpack SET claimed_at=%d WHERE steamid='%s' AND item_key='%s'",
         GetTime(), authid, itemKey);
     SQL_TQuery(g_hDb, DB_OnClaimed, q);
 
