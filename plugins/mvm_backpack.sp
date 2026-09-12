@@ -38,7 +38,7 @@ new Handle:g_cvWebBaseUrl;
 new Handle:g_hDb = INVALID_HANDLE;
 
 /* Socket server */
-new Socket:g_hListener = INVALID_SOCKET;
+Socket g_hListener = null;
 new StringMap:g_hReqBuf;      /* key "SOCK:<id>" -> raw http bytes */
 new StringMap:g_hReqCtx;      /* key "SOCK:<id>" -> bitflags: 1 = items ctx, 2 = give ctx */
 new StringMap:g_hCtxSock;     /* key "CTX_ITEMS" / "CTX_GIVE" -> socket id string */
@@ -86,35 +86,23 @@ public OnPluginStart()
     g_hTokenExpire = new StringMap();
 
     new String:err[256];
-    g_hDb = SQLite_UseDatabase("mvm_backpack", DB_OnConnect, 0, err, sizeof(err));
+    g_hDb = SQLite_UseDatabase("mvm_backpack", err, sizeof(err));
     if (g_hDb == INVALID_HANDLE)
+    {
         LogError("[MvMBP] SQLite open failed: %s", err);
+        return;
+    }
+
+    CreateBackpackSchema();
 
     /* Late load: nothing to restore, tokens are per request. */
 }
 
-public DB_OnConnect(Handle:db, const String:error[], any:data)
+CreateBackpackSchema()
 {
-    if (db == INVALID_HANDLE)
-    {
-        LogError("[MvMBP] DB connect failed: %s", error);
-        return;
-    }
-    g_hDb = db;
-
     new String:q[512];
     Format(q, sizeof(q),
-        "CREATE TABLE IF NOT EXISTS mvm_backpack ("
-        "steamid CHAR(32) NOT NULL, "
-        "item_key CHAR(32) NOT NULL, "
-        "item_name VARCHAR(96) NOT NULL, "
-        "item_class VARCHAR(32) NOT NULL, "
-        "item_index INT NOT NULL, "
-        "quality INT NOT NULL, "
-        "pool INT NOT NULL, "
-        "got_at INT NOT NULL, "
-        "claimed_at INT NULL, "
-        "PRIMARY KEY (steamid, item_key));");
+        "CREATE TABLE IF NOT EXISTS mvm_backpack (steamid CHAR(32) NOT NULL, item_key CHAR(32) NOT NULL, item_name VARCHAR(96) NOT NULL, item_class VARCHAR(32) NOT NULL, item_index INT NOT NULL, quality INT NOT NULL, pool INT NOT NULL, got_at INT NOT NULL, claimed_at INT NULL, PRIMARY KEY (steamid, item_key));");
 
     SQL_TQuery(g_hDb, DB_OnSchemaDone, q);
 }
@@ -148,8 +136,8 @@ LoadRewards()
         return;
     }
 
-    new Handle:kv = CreateKeyValues("Rewards");
-    if (!KvImportFromFile(kv, path))
+    KeyValues kv = new KeyValues("Rewards");
+    if (!kv.ImportFromFile(path))
     {
         LogError("[MvMBP] Failed to parse %s", path);
         CloseHandle(kv);
@@ -237,7 +225,7 @@ GetRandomPoolItem(ePool:pool)
 public Action:Event_RoundWin(Handle:event, const String:name[], bool:dontBroadcast)
 {
     /* MvM: humans are BLU (3), robots are RED (2). */
-    if (GetEventInt(event, "winner") != TFTeam_Blue)
+    if (GetEventInt(event, "winner") != _:TFTeam_Blue)
         return Plugin_Continue;
 
     new logic = FindEntityByClassname(-1, "tf_logic_mann_vs_machine");
@@ -248,7 +236,7 @@ public Action:Event_RoundWin(Handle:event, const String:name[], bool:dontBroadca
     {
         if (!IsClientInGame(client))         continue;
         if (IsFakeClient(client))            continue;
-        if (GetClientTeam(client) != TFTeam_Blue) continue;
+        if (GetClientTeam(client) != _:TFTeam_Blue) continue;
         AwardRewards(client);
     }
 
@@ -287,9 +275,7 @@ AddToBackpack(client, idx)
 
     new String:q[600];
     Format(q, sizeof(q),
-        "INSERT OR IGNORE INTO mvm_backpack "
-        "(steamid, item_key, item_name, item_class, item_index, quality, pool, got_at) "
-        "VALUES ('%s', '%s', '%s', '%s', %d, %d, %d, %d);",
+        "INSERT OR IGNORE INTO mvm_backpack (steamid, item_key, item_name, item_class, item_index, quality, pool, got_at) VALUES ('%s', '%s', '%s', '%s', %d, %d, %d, %d);",
         authid,
         g_sItemKey[idx],
         g_sItemName[idx],
@@ -359,11 +345,11 @@ GenerateToken(String:buffer[], size)
  * until its TTL expires. */
 bool:ResolveToken(const String:token[], String:authidOut[], size)
 {
-    if (g_hTokenClient.GetString(token, authidOut, size) <= 0)
+    if (!g_hTokenClient.GetString(token, authidOut, size))
         return false;
 
     new String:expiryStr[16];
-    if (g_hTokenExpire.GetString(token, expiryStr, sizeof(expiryStr)) <= 0)
+    if (!g_hTokenExpire.GetString(token, expiryStr, sizeof(expiryStr)))
         return false;
 
     if (GetTime() > StringToInt(expiryStr))
@@ -380,38 +366,38 @@ bool:ResolveToken(const String:token[], String:authidOut[], size)
 
 StartHttpServer()
 {
-    if (g_hListener != INVALID_SOCKET)
-    {
-        SocketClose(g_hListener);
-        g_hListener = INVALID_SOCKET;
-    }
+    if (g_hListener != null)
+        g_hListener.Close();
 
     new port = GetConVarInt(g_cvServerPort);
-    g_hListener = SocketCreate(SOCKET_TCP, OnSocketError);
-    if (g_hListener == INVALID_SOCKET)
+    g_hListener = new Socket();
+    if (g_hListener == null)
     {
         LogError("[MvMBP] couldn't create socket");
         return;
     }
 
-    if (!SocketBind(g_hListener, port))
+    g_hListener.SetErrorCallback(OnSocketError);
+    g_hListener.SetIncomingCallback(OnSocketIncoming);
+
+    if (!g_hListener.Bind("0.0.0.0", port))
     {
         LogError("[MvMBP] couldn't bind port %d", port);
-        SocketClose(g_hListener);
-        g_hListener = INVALID_SOCKET;
+        g_hListener.Close();
+        g_hListener = null;
         return;
     }
 
-    SocketListen(g_hListener, OnSocketIncoming);
+    g_hListener.Listen();
     PrintToServer("[MvMBP] Backpack API listening on TCP :%d", port);
 }
 
-public OnSocketError(Socket:sock, const String:error[], any:data)
+public OnSocketError(Socket sock, const int errorType, const char[] errorMsg, any data)
 {
-    LogError("[MvMBP] socket error: %s", error);
+    LogError("[MvMBP] socket error: %s", errorMsg);
 }
 
-public OnSocketIncoming(Socket:server, Socket:client, const String:ip[], port, any:data)
+public OnSocketIncoming(Socket server, Socket client, const char[] ip, int port, any data)
 {
     new String:key[24];
     Format(key, sizeof(key), "SOCK:%d", _:client);
@@ -421,10 +407,10 @@ public OnSocketIncoming(Socket:server, Socket:client, const String:ip[], port, a
     new String:empty[1];
     g_hReqBuf.SetString(key, empty);
 
-    SocketSetReceiveCallback(client, OnSocketReceive);
+    client.SetReceiveCallback(OnSocketReceive);
 }
 
-public OnSocketReceive(Socket:sock, const String:data[], size, any:data2)
+public OnSocketReceive(Socket sock, const char[] data, const int size, const char[] senderIP, int senderPort, any data2)
 {
     new String:key[24];
     Format(key, sizeof(key), "SOCK:%d", _:sock);
@@ -443,7 +429,7 @@ public OnSocketReceive(Socket:sock, const String:data[], size, any:data2)
     }
     else if (strlen(buf) >= HTTP_BUF_SIZE)
     {
-        SocketClose(sock);
+        sock.Close();
         g_hReqBuf.Remove(key);
         g_hReqCtx.Remove(key);
     }
@@ -454,7 +440,7 @@ public OnSocketReceive(Socket:sock, const String:data[], size, any:data2)
 }
 
 /* Minimal HTTP/1.1 server: GET /api/items?token=..., POST /api/give {JSON} */
-HandleRequest(Socket:sock, const String:key[], const String:request[])
+HandleRequest(Socket sock, const String:key[], const String:request[])
 {
     decl String:requestLine[1024];
     new idx = BreakString(request, requestLine, sizeof(requestLine));
@@ -529,15 +515,15 @@ HandleRequest(Socket:sock, const String:key[], const String:request[])
 
 /* Closes the socket and removes all maps we keyed by it.
  * Async DB handlers must call this after their final ReplyJSON. */
-CloseSockCleanup(Socket:sock)
+CloseSockCleanup(Socket sock)
 {
-    if (sock == INVALID_SOCKET)
+    if (sock == null)
         return;
 
     decl String:key[24];
     Format(key, sizeof(key), "SOCK:%d", _:sock);
 
-    SocketClose(sock);
+    sock.Close();
     g_hReqBuf.Remove(key);
     g_hReqCtx.Remove(key);
 
@@ -563,7 +549,7 @@ ParsePath(const String:path[], String:route[], routeSize, String:query[], queryS
 
 /* -------------------- GET /api/items -------------------- */
 
-HandleItems(Socket:sock, const String:query[])
+HandleItems(Socket sock, const String:query[])
 {
     decl String:token[TOKEN_LENGTH + 1];
     GetQueryParam(query, "token", token, sizeof(token));
@@ -590,8 +576,7 @@ HandleItems(Socket:sock, const String:query[])
 
     new String:q[512];
     Format(q, sizeof(q),
-        "SELECT item_key, item_name, item_class, item_index, quality, got_at, claimed_at "
-        "FROM mvm_backpack WHERE steamid='%s' ORDER BY got_at DESC", authid);
+        "SELECT item_key, item_name, item_class, item_index, quality, got_at, claimed_at FROM mvm_backpack WHERE steamid='%s' ORDER BY got_at DESC", authid);
     SQL_TQuery(g_hDb, DB_OnItemsFetched, q);
 }
 
@@ -602,9 +587,9 @@ public DB_OnItemsFetched(Handle:owner, Handle:results, const String:error[], any
 
     new String:id[24];
     g_hCtxSock.GetString("CTX_ITEMS", id, sizeof(id));
-    Socket:sock = Socket:StringToInt(id);
+    Socket sock = view_as<Socket>(StringToInt(id));
 
-    if (error[0] || sock == INVALID_SOCKET || authid[0] == 0)
+    if (error[0] || sock == null || authid[0] == 0)
     {
         LogError("[MvMBP] items query error: %s", error);
         g_hCtxSock.Remove("CTX_ITEMS");
@@ -673,7 +658,7 @@ public DB_OnItemsFetched(Handle:owner, Handle:results, const String:error[], any
 
 /* -------------------- POST /api/give -------------------- */
 
-HandleGive(Socket:sock, const String:body[])
+HandleGive(Socket sock, const String:body[])
 {
     decl String:token[TOKEN_LENGTH + 1];
     decl String:itemKey[32];
@@ -703,8 +688,7 @@ HandleGive(Socket:sock, const String:body[])
 
     new String:q[512];
     Format(q, sizeof(q),
-        "SELECT item_key, item_name, item_class, item_index, quality, pool, claimed_at "
-        "FROM mvm_backpack WHERE steamid='%s' AND item_key='%s'",
+        "SELECT item_key, item_name, item_class, item_index, quality, pool, claimed_at FROM mvm_backpack WHERE steamid='%s' AND item_key='%s'",
         authid, itemKey);
     SQL_TQuery(g_hDb, DB_OnGiveLookup, q);
 }
@@ -718,9 +702,9 @@ public DB_OnGiveLookup(Handle:owner, Handle:results, const String:error[], any:d
 
     new String:id[24];
     g_hCtxSock.GetString("CTX_GIVE", id, sizeof(id));
-    Socket:sock = Socket:StringToInt(id);
+    Socket sock = view_as<Socket>(StringToInt(id));
 
-    if (error[0] || sock == INVALID_SOCKET || authid[0] == 0 || itemKey[0] == 0)
+    if (error[0] || sock == null || authid[0] == 0 || itemKey[0] == 0)
     {
         LogError("[MvMBP] give lookup error: %s", error);
         CloseSockCleanup(sock);
@@ -803,7 +787,7 @@ FindItemByKey(const String:key[])
     return -1;
 }
 
-GiveItemInGame(client, const String:name[], const String:cls[], index, quality, pool)
+GiveItemInGame(client, String:name[], String:cls[], index, quality, pool)
 {
     new Handle:item = TF2Items_CreateItem(OVERRIDE_ALL);
     if (item == INVALID_HANDLE)
@@ -886,7 +870,7 @@ GetWeaponSlotIndex(const String:cls[])
 
 /* ============================ HTTP reply ============================ */
 
-ReplyJSON(Socket:sock, code, const String:body[])
+ReplyJSON(Socket sock, code, const String:body[])
 {
     decl String:phrase[32];
     switch (code)
@@ -914,7 +898,7 @@ ReplyJSON(Socket:sock, code, const String:body[])
     if (code != 204)
         pos += Format(resp[pos], sizeof(resp) - pos, "%s", body);
 
-    SocketSend(sock, resp);
+    sock.Send(resp);
 }
 
 /* ============================ Parsing helpers ============================ */
@@ -988,21 +972,21 @@ GetJsonString(const String:body[], const String:key[], String:out[], size)
     ReplaceString(out, size, "\\\\", "\\");
 }
 
-EscapeJSON(const String:in[], String:out[], size)
+EscapeJSON(const String:input[], String:out[], size)
 {
     new o = 0;
-    for (new i = 0; in[i] != 0; i++)
+    for (new i = 0; input[i] != 0; i++)
     {
         if (o >= size - 2)
             break;
-        switch (in[i])
+        switch (input[i])
         {
             case '"':  { out[o++] = '\\'; out[o++] = '"'; }
             case '\\': { out[o++] = '\\'; out[o++] = '\\'; }
             case '\n': { out[o++] = '\\'; out[o++] = 'n'; }
             case '\t': { out[o++] = '\\'; out[o++] = 't'; }
             default:
-                out[o++] = in[i];
+                out[o++] = input[i];
         }
     }
     out[o] = 0;
